@@ -1,205 +1,294 @@
 <!DOCTYPE html>
 <html lang="ja">
 <head>
-    <meta charset="utf-8">
+    <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>コンパス方向線マップ</title>
-
-    <!-- Leaflet CSS -->
-    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
-
+    <title>AI Voice Recorder</title>
+    <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        html, body {
-            height: 100%;
-            margin: 0;
-            padding: 0;
-        }
-        #map {
-            width: 100%;
-            height: 100%;
-        }
-        /* 左下の丸いコンパスボタン */
-        #compassBtn {
-            position: absolute;
-            left: 10px;
-            bottom: 80px;           /* 位置取得ボタンの上に被らないように */
-            width: 56px;
-            height: 56px;
-            background: white;
-            border-radius: 50%;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.3);
-            z-index: 1000;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 28px;
-            user-select: none;
-        }
-        #compassBtn:active {
-            background: #f0f0f0;
-        }
+        /* iOSでのタップ遅延対策など */
+        body { touch-action: manipulation; }
     </style>
 </head>
-<body>
+<body class="bg-gray-100 h-screen flex flex-col p-4 text-gray-800">
 
-<div id="map"></div>
+    <header class="mb-4 text-center">
+        <h1 class="text-xl font-bold text-gray-700">文字起こし ＆ 無音カット</h1>
+    </header>
 
-<!-- コンパスボタン -->
-<div id="compassBtn" title="方向線を表示/非表示">🧭</div>
+    <div class="bg-white p-3 rounded-lg shadow mb-4 flex justify-between items-center">
+        <label class="text-sm font-semibold">言語選択:</label>
+        <select id="langSelect" class="border rounded p-1 text-sm bg-gray-50">
+            <option value="ja-JP" selected>日本語</option>
+            <option value="en-US">English</option>
+            <option value="zh-CN">中文</option>
+        </select>
+    </div>
 
-<!-- Leaflet JS -->
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <div class="flex-grow bg-white rounded-lg shadow p-3 mb-4 overflow-y-auto border border-gray-200 relative">
+        <div id="status" class="absolute top-2 right-2 text-xs text-red-500 font-bold hidden">● 録音中...</div>
+        <p id="transcript" class="text-lg leading-relaxed whitespace-pre-wrap text-gray-600">ここに文字起こしが表示されます...</p>
+    </div>
+
+    <div id="playerArea" class="hidden mb-4">
+        <p class="text-xs text-gray-500 mb-1">無音カット済み音声:</p>
+        <audio id="audioPlayer" controls class="w-full h-10"></audio>
+    </div>
+
+    <div class="grid grid-cols-2 gap-4 pb-4">
+        <button id="recordBtn" class="bg-red-500 hover:bg-red-600 text-white font-bold py-4 rounded-xl shadow-lg flex flex-col items-center justify-center transition active:scale-95">
+            <span class="text-2xl mb-1">🎙️</span>
+            <span>録音開始</span>
+        </button>
+        <button id="stopBtn" disabled class="bg-gray-300 text-gray-500 font-bold py-4 rounded-xl shadow-lg flex flex-col items-center justify-center transition active:scale-95">
+            <span class="text-2xl mb-1">⏹️</span>
+            <span>停止・再生</span>
+        </button>
+    </div>
 
 <script>
-// 変数
-let map;
-let userMarker;
-let directionLine = null;        // 方向線（Polyline）
-let isLineVisible = false;
-let currentHeading = 0;          // 現在の向いている方向（度）
+    // --- 変数定義 ---
+    let recognition;
+    let mediaRecorder;
+    let audioChunks = [];
+    let isRecording = false;
+    
+    // UI要素
+    const recordBtn = document.getElementById('recordBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const transcriptEl = document.getElementById('transcript');
+    const langSelect = document.getElementById('langSelect');
+    const statusEl = document.getElementById('status');
+    const playerArea = document.getElementById('playerArea');
+    const audioPlayer = document.getElementById('audioPlayer');
 
-// 地図初期化
-function initMap() {
-    map = L.map('map').setView([35.681, 139.767], 16);
-
-    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
-        attribution: '&copy; OpenStreetMap contributors'
-    }).addTo(map);
-
-    // 現在地取得
-    map.locate({ setView: true, maxZoom: 18, watch: true });
-}
-
-// 位置取得成功時
-function onLocationFound(e) {
-    const radius = e.accuracy / 2;
-
-    if (!userMarker) {
-        userMarker = L.circle(e.latlng, radius).addTo(map);
-        L.marker(e.latlng).addTo(map)
-            .bindPopup("あなたはここ")
-            .openPopup();
-    } else {
-        userMarker.setLatLng(e.latlng);
-        userMarker.setRadius(radius);
-        map.setView(e.latlng);
+    // Web Speech APIの互換性チェック
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SpeechRecognition) {
+        alert("このブラウザは音声認識に対応していません。ChromeまたはSafariを使用してください。");
     }
 
-    // 現在地が取れたらコンパスイベントを有効化
-    enableCompass();
-}
+    // --- イベントリスナー ---
+    recordBtn.addEventListener('click', startRecording);
+    stopBtn.addEventListener('click', stopRecording);
 
-// 位置取得エラー
-function onLocationError(e) {
-    alert(e.message);
-}
-
-// コンパス（DeviceOrientation）の有効化
-function enableCompass() {
-    if (window.DeviceOrientationEvent) {
-        window.addEventListener('deviceorientation', handleOrientation);
+    // --- メイン処理: 録音開始 ---
+    async function startRecording() {
+        // 初期化
+        transcriptEl.textContent = "";
+        audioChunks = [];
+        playerArea.classList.add('hidden');
         
-        // iOS 13+ は許可が必要
-        if (DeviceOrientationEvent.requestPermission) {
-            document.getElementById('compassBtn').addEventListener('click', requestCompassPermission);
-        }
-    } else {
-        alert("この端末はコンパスに対応していません");
-    }
-}
+        try {
+            // 1. マイクストリームの取得
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            
+            // 2. 音声録音の開始 (MediaRecorder)
+            mediaRecorder = new MediaRecorder(stream);
+            mediaRecorder.ondataavailable = event => {
+                audioChunks.push(event.data);
+            };
+            mediaRecorder.start();
 
-function requestCompassPermission() {
-    DeviceOrientationEvent.requestPermission()
-        .then(response => {
-            if (response === 'granted') {
-                window.addEventListener('deviceorientation', handleOrientation);
+            // 3. 文字起こしの開始 (SpeechRecognition)
+            recognition = new SpeechRecognition();
+            recognition.lang = langSelect.value;
+            recognition.continuous = true; // 連続認識
+            recognition.interimResults = true; // 途中経過を表示
+
+            recognition.onresult = (event) => {
+                let finalTranscript = '';
+                for (let i = event.resultIndex; i < event.results.length; ++i) {
+                    if (event.results[i].isFinal) {
+                        finalTranscript += event.results[i][0].transcript + '\n';
+                    } else {
+                        // 途中経過（薄く表示するなど可能だが今回は単純結合）
+                        // finalTranscript += event.results[i][0].transcript;
+                    }
+                }
+                // 既存のテキストに追記ではなく、常に最新の認識結果全体を描画する簡易実装
+                // (長い会話の場合は追記型にするのがベター)
+                const currentText = Array.from(event.results)
+                    .map(result => result[0].transcript).join('');
+                transcriptEl.textContent = currentText;
+                transcriptEl.scrollTop = transcriptEl.scrollHeight;
+            };
+
+            recognition.onerror = (event) => {
+                console.error("Speech API Error:", event.error);
+            };
+
+            // 録音が止まったら自動再開（スマホ対策）
+            recognition.onend = () => {
+                if (isRecording) recognition.start();
+            };
+
+            recognition.start();
+
+            // UI更新
+            isRecording = true;
+            statusEl.classList.remove('hidden');
+            recordBtn.disabled = true;
+            recordBtn.classList.replace('bg-red-500', 'bg-gray-300');
+            stopBtn.disabled = false;
+            stopBtn.classList.replace('bg-gray-300', 'bg-blue-600');
+            stopBtn.classList.replace('text-gray-500', 'text-white');
+
+        } catch (err) {
+            console.error("Error:", err);
+            alert("マイクへのアクセスが拒否されました。");
+        }
+    }
+
+    // --- メイン処理: 録音停止と処理 ---
+    function stopRecording() {
+        if (!isRecording) return;
+        isRecording = false;
+
+        // 文字起こし停止
+        recognition.stop();
+        
+        // 録音停止 -> データ処理発火
+        mediaRecorder.onstop = async () => {
+            const audioBlob = new Blob(audioChunks, { type: 'audio/webm' }); // Chrome等はwebm
+            
+            // 無音削除処理を実行
+            const processedUrl = await processSilence(audioBlob);
+            
+            // プレイヤーにセット
+            audioPlayer.src = processedUrl;
+            playerArea.classList.remove('hidden');
+        };
+        mediaRecorder.stop();
+
+        // UIリセット
+        statusEl.classList.add('hidden');
+        recordBtn.disabled = false;
+        recordBtn.classList.replace('bg-gray-300', 'bg-red-500');
+        stopBtn.disabled = true;
+        stopBtn.classList.replace('bg-blue-600', 'bg-gray-300');
+        stopBtn.classList.replace('text-white', 'text-gray-500');
+    }
+
+    // --- 無音削除アルゴリズム (Web Audio API) ---
+    async function processSilence(blob) {
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        const arrayBuffer = await blob.arrayBuffer();
+        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
+
+        const rawData = audioBuffer.getChannelData(0); // モノラル想定
+        const sampleRate = audioBuffer.sampleRate;
+        
+        // パラメータ調整
+        const threshold = 0.02; // 音量閾値 (0.0~1.0)
+        const minSilenceDuration = 0.5; // この秒数以上の無音をカット
+        const padding = 0.2; // 音声の前後に残す余白(秒)
+
+        // 有音区間を抽出
+        const chunks = [];
+        let isSpeaking = false;
+        let startIndex = 0;
+        const silenceSamples = minSilenceDuration * sampleRate;
+        const paddingSamples = padding * sampleRate;
+
+        // 簡易的な無音検知ループ
+        // 実際のアプリではRMS（二乗平均平方根）を使うのが精度高いが、ここでは振幅の絶対値で簡易判定
+        let lastVoiceIndex = 0;
+        
+        // 有音データのインデックスリストを作成
+        let activeIndices = [];
+        
+        for (let i = 0; i < rawData.length; i++) {
+            if (Math.abs(rawData[i]) > threshold) {
+                // 有音
+                // 前後のパディングを含めてインデックスを記録
+                let start = Math.max(0, i - paddingSamples);
+                let end = Math.min(rawData.length, i + paddingSamples);
+                activeIndices.push([start, end]);
+                
+                // 処理高速化のため少しスキップ
+                i += 100; 
             }
-        })
-        .catch(console.error);
-}
-
-// 方向が変わったとき
-function handleOrientation(event) {
-    if (event.alpha !== null) {
-        // iOS と Android で向きの計算が少し違うが、webkitCompassHeading があればそれを使う
-        if (event.webkitCompassHeading !== undefined) {
-            currentHeading = event.webkitCompassHeading;  // iOS
-        } else {
-            currentHeading = 360 - event.alpha;           // Android（大体合ってる）
         }
 
-        // 線が表示されている状態ならリアルタイムで更新
-        if (isLineVisible && userMarker) {
-            drawDirectionLine();
+        // 重複する区間をマージ
+        if (activeIndices.length === 0) return URL.createObjectURL(blob); // ずっと無音ならそのまま返す
+
+        let merged = [];
+        let current = activeIndices[0];
+
+        for (let i = 1; i < activeIndices.length; i++) {
+            if (activeIndices[i][0] < current[1]) {
+                current[1] = Math.max(current[1], activeIndices[i][1]);
+            } else {
+                merged.push(current);
+                current = activeIndices[i];
+            }
         }
-    }
-}
+        merged.push(current);
 
-// 方向線を描く（1000m先まで）
-function drawDirectionLine() {
-    if (!userMarker) return;
+        // マージされた区間から新しいバッファを作成
+        const totalLength = merged.reduce((acc, val) => acc + (val[1] - val[0]), 0);
+        const newBuffer = audioContext.createBuffer(1, totalLength, sampleRate);
+        const newData = newBuffer.getChannelData(0);
 
-    const center = userMarker.getLatLng();
-    const distance = 1000000; // 1km先まで（十分長い）
+        let offset = 0;
+        merged.forEach(range => {
+            const length = range[1] - range[0];
+            newData.set(rawData.subarray(range[0], range[1]), offset);
+            offset += length;
+        });
 
-    // 目的地の緯度経度を計算（簡易版：地球を平面と仮定）
-    const bearing = currentHeading;
-    const R = 6371000; // 地球の半径（m）
-    const rad = bearing * Math.PI / 180;
-
-    const lat1 = center.lat * Math.PI / 180;
-    const lon1 = center.lng * Math.PI / 180;
-
-    const lat2 = Math.asin(
-        Math.sin(lat1) * Math.cos(distance / R) +
-        Math.cos(lat1) * Math.sin(distance / R) * Math.cos(rad)
-    );
-    const lon2 = lon1 + Math.atan2(
-        Math.sin(rad) * Math.sin(distance / R) * Math.cos(lat1),
-        Math.cos(distance / R) - Math.sin(lat1) * Math.sin(lat2)
-    );
-
-    const endLatLng = L.latLng(lat2 * 180 / Math.PI, lon2 * 180 / Math.PI);
-
-    if (directionLine) {
-        directionLine.setLatLngs([center, endLatLng]);
-    } else {
-        directionLine = L.polyline([center, endLatLng], {
-            color: 'orange',
-            weight: 6,
-            opacity: 0.9
-        }).addTo(map);
-    }
-}
-
-// ボタンクリックでトグル
-document.getElementById('compassBtn').addEventListener('click', function() {
-    if (!userMarker) {
-        alert("現在地がまだ取得できていません");
-        return;
+        return bufferToWave(newBuffer, totalLength);
     }
 
-    isLineVisible = !isLineVisible;
+    // AudioBufferをWAV形式のBlob URLに変換するヘルパー関数
+    function bufferToWave(abuffer, len) {
+        let numOfChan = abuffer.numberOfChannels,
+            length = len * numOfChan * 2 + 44,
+            buffer = new ArrayBuffer(length),
+            view = new DataView(buffer),
+            channels = [], i, sample,
+            offset = 0,
+            pos = 0;
 
-    if (isLineVisible) {
-        drawDirectionLine();
-        this.style.background = '#fff3e0';
-    } else {
-        if (directionLine) {
-            map.removeLayer(directionLine);
-            directionLine = null;
+        // WAVヘッダー書き込み
+        setUint32(0x46464952); // "RIFF"
+        setUint32(length - 8); // file length - 8
+        setUint32(0x45564157); // "WAVE"
+
+        setUint32(0x20746d66); // "fmt " chunk
+        setUint32(16); // length = 16
+        setUint16(1); // PCM (uncompressed)
+        setUint16(numOfChan);
+        setUint32(abuffer.sampleRate);
+        setUint32(abuffer.sampleRate * 2 * numOfChan); // avg. bytes/sec
+        setUint16(numOfChan * 2); // block-align
+        setUint16(16); // 16-bit (hardcoded in this demo)
+
+        setUint32(0x61746164); // "data" - chunk
+        setUint32(length - pos - 4); // chunk length
+
+        // 音声データの書き込み (Interleave)
+        for(i = 0; i < abuffer.numberOfChannels; i++)
+            channels.push(abuffer.getChannelData(i));
+
+        while(pos < len) {
+            for(i = 0; i < numOfChan; i++) {
+                // float to 16-bit PCM
+                sample = Math.max(-1, Math.min(1, channels[i][pos])); 
+                sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767)|0; 
+                view.setInt16(44 + offset, sample, true); 
+                offset += 2;
+            }
+            pos++;
         }
-        this.style.background = 'white';
+
+        return URL.createObjectURL(new Blob([buffer], {type: "audio/wav"}));
+
+        function setUint16(data) { view.setUint16(pos, data, true); pos += 2; }
+        function setUint32(data) { view.setUint32(pos, data, true); pos += 4; }
     }
-});
-
-// イベント登録
-map.on('locationfound', onLocationFound);
-map.on('locationerror', onLocationError);
-
-// 地図初期化
-initMap();
-
 </script>
 </body>
 </html>
