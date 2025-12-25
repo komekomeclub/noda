@@ -3,255 +3,235 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Android Voice Recorder</title>
+    <title>AI Post-Transcription</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
-        body { touch-action: manipulation; }
-        /* 読みやすくするためのカスタムフォント設定 */
-        body { font-family: sans-serif; }
+        body { touch-action: manipulation; font-family: sans-serif; }
     </style>
 </head>
-<body class="bg-slate-100 h-screen flex flex-col p-4 text-slate-800">
+<body class="bg-slate-900 h-screen flex flex-col p-4 text-slate-100">
 
     <header class="mb-4 text-center">
-        <h1 class="text-xl font-bold text-slate-700">文字起こし ＆ 無音カット</h1>
-        <p class="text-xs text-slate-500">Android Chrome専用版</p>
+        <h1 class="text-xl font-bold text-white">録音後 AI文字起こし</h1>
+        <p class="text-xs text-slate-400 mt-1">
+            録音 → 無音カット → AI解析<br>
+            <span class="text-yellow-500">※初回はモデル(40MB)をDLします</span>
+        </p>
     </header>
 
-    <div class="bg-white p-3 rounded-lg shadow-sm mb-4 flex justify-between items-center">
-        <label class="text-sm font-bold">言語:</label>
-        <select id="langSelect" class="border rounded p-2 text-sm bg-slate-50 outline-none">
-            <option value="ja-JP" selected>日本語</option>
-            <option value="en-US">English</option>
-        </select>
+    <div id="statusArea" class="bg-slate-800 p-2 rounded mb-2 text-xs font-mono h-24 overflow-y-auto border border-slate-700">
+        <div class="text-blue-400">[System] 準備完了</div>
     </div>
 
-    <div class="flex-grow bg-white rounded-lg shadow-sm p-4 mb-4 overflow-y-auto border border-slate-200 relative min-h-[200px]">
-        <div id="recordingIndicator" class="absolute top-3 right-3 flex items-center gap-2 hidden">
-            <span class="animate-ping absolute inline-flex h-3 w-3 rounded-full bg-red-400 opacity-75"></span>
-            <span class="relative inline-flex rounded-full h-3 w-3 bg-red-500"></span>
-            <span class="text-xs text-red-500 font-bold">録音中</span>
+    <div class="flex-grow bg-white rounded-lg p-3 mb-4 overflow-y-auto relative min-h-[150px] text-slate-800">
+        <div id="loadingIndicator" class="hidden absolute inset-0 bg-white/90 flex flex-col items-center justify-center z-10">
+            <div class="animate-spin h-8 w-8 border-4 border-blue-500 border-t-transparent rounded-full mb-2"></div>
+            <p class="text-xs font-bold text-blue-600" id="progressText">AI処理中...</p>
         </div>
-        <div id="transcript" class="text-lg leading-relaxed whitespace-pre-wrap text-slate-700 h-full">
-            <span class="text-slate-400 text-sm">ここに文字起こし結果が表示されます...</span>
-        </div>
+        <p id="transcript" class="text-base leading-relaxed whitespace-pre-wrap">ここに結果が表示されます。</p>
     </div>
 
-    <div id="playerArea" class="hidden mb-4 bg-blue-50 p-3 rounded-lg border border-blue-200">
+    <div id="playerArea" class="hidden mb-4 bg-slate-800 p-3 rounded border border-slate-700">
         <div class="flex justify-between items-end mb-2">
-            <p class="text-xs text-blue-800 font-bold">無音カット済み音声:</p>
-            <a id="downloadLink" class="text-xs text-blue-600 underline font-bold px-2">保存 (WAV)</a>
+            <p class="text-xs text-blue-300 font-bold">無音カット済み音声:</p>
+            <a id="downloadLink" class="text-xs text-blue-400 underline">保存</a>
         </div>
-        <audio id="audioPlayer" controls class="w-full h-10"></audio>
+        <audio id="audioPlayer" controls class="w-full h-8"></audio>
     </div>
 
     <div class="grid grid-cols-2 gap-4 pb-2">
-        <button id="recordBtn" class="bg-red-500 active:bg-red-600 text-white font-bold py-4 rounded-xl shadow-md flex flex-col items-center justify-center transition-transform active:scale-95">
-            <span class="text-2xl mb-1">🎙️</span>
+        <button id="recordBtn" class="bg-red-600 active:bg-red-700 text-white font-bold py-4 rounded-xl shadow-lg flex flex-col items-center justify-center">
             <span>録音開始</span>
         </button>
-        <button id="stopBtn" disabled class="bg-gray-300 text-gray-500 font-bold py-4 rounded-xl shadow-md flex flex-col items-center justify-center transition-transform active:scale-95">
-            <span class="text-2xl mb-1">⏹️</span>
-            <span>停止・処理</span>
+        <button id="stopBtn" disabled class="bg-slate-600 text-slate-400 font-bold py-4 rounded-xl shadow-lg flex flex-col items-center justify-center">
+            <span>停止＆解析</span>
         </button>
     </div>
 
-    <div id="logMessage" class="text-center text-xs text-slate-400 h-4"></div>
+<script type="module">
+    // CDNからTransformers.jsをインポート
+    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@xenova/transformers@2.14.0';
 
-<script>
-    // --- Android向け設定 ---
-    const MIME_TYPE = 'audio/webm'; // Android Chrome標準
+    // ローカルモデルの検索を無効化（CDNのみ使用）
+    env.allowLocalModels = false;
+    env.useBrowserCache = true;
 
-    // UI要素
-    const recordBtn = document.getElementById('recordBtn');
-    const stopBtn = document.getElementById('stopBtn');
-    const transcriptEl = document.getElementById('transcript');
-    const langSelect = document.getElementById('langSelect');
-    const indicator = document.getElementById('recordingIndicator');
-    const playerArea = document.getElementById('playerArea');
-    const audioPlayer = document.getElementById('audioPlayer');
-    const downloadLink = document.getElementById('downloadLink');
-    const logMessage = document.getElementById('logMessage');
-
-    // 変数
-    let recognition;
-    let mediaRecorder;
+    // --- 変数 ---
+    let transcriber = null; // AIモデルインスタンス
+    let mediaRecorder = null;
     let audioChunks = [];
     let isRecording = false;
 
-    // 初期化チェック
-    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    if (!SpeechRecognition) {
-        alert("このブラウザは文字起こしに対応していません。");
+    // --- UI要素 ---
+    const recordBtn = document.getElementById('recordBtn');
+    const stopBtn = document.getElementById('stopBtn');
+    const transcriptEl = document.getElementById('transcript');
+    const statusArea = document.getElementById('statusArea');
+    const playerArea = document.getElementById('playerArea');
+    const audioPlayer = document.getElementById('audioPlayer');
+    const downloadLink = document.getElementById('downloadLink');
+    const loadingIndicator = document.getElementById('loadingIndicator');
+    const progressText = document.getElementById('progressText');
+
+    // --- ログ機能 ---
+    function log(msg) {
+        const d = document.createElement('div');
+        d.textContent = `> ${msg}`;
+        statusArea.appendChild(d);
+        statusArea.scrollTop = statusArea.scrollHeight;
     }
 
-    // イベント
+    // --- イベント ---
     recordBtn.addEventListener('click', startRecording);
     stopBtn.addEventListener('click', stopRecording);
 
-    // --- 1. 録音＆文字起こし開始 ---
-    async function startRecording() {
-        // UIリセット
-        transcriptEl.textContent = "";
-        audioChunks = [];
-        playerArea.classList.add('hidden');
-        log("マイク準備中...");
+    // --- 1. AIモデルのロード (初回のみ) ---
+    async function loadModel() {
+        if (transcriber) return transcriber;
+
+        log("AIモデルをダウンロード中... (約40MB)");
+        progressText.textContent = "モデル準備中(初回は長いです)...";
+        loadingIndicator.classList.remove('hidden');
 
         try {
-            // マイク取得
-            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-
-            // A. 音声認識 (SpeechRecognition)
-            recognition = new SpeechRecognition();
-            recognition.lang = langSelect.value;
-            recognition.continuous = true;
-            recognition.interimResults = true;
-
-            recognition.onresult = (event) => {
-                let finalTxt = '';
-                let interimTxt = '';
-                for (let i = event.resultIndex; i < event.results.length; ++i) {
-                    if (event.results[i].isFinal) {
-                        finalTxt += event.results[i][0].transcript + '\n';
-                    } else {
-                        interimTxt += event.results[i][0].transcript;
+            // 軽量版Whisper (multilingual) をロード
+            transcriber = await pipeline('automatic-speech-recognition', 'Xenova/whisper-tiny', {
+                progress_callback: (data) => {
+                    if (data.status === 'progress') {
+                        // ダウンロード進捗を表示
+                        const percent = Math.round(data.progress || 0);
+                        if(percent % 10 === 0) log(`DL: ${data.file} ${percent}%`);
                     }
                 }
-                // 結果表示（確定分＋未確定分）
-                // 既存のテキストに追加ではなく、常に全体を描画する方式で同期ズレを防ぐ
-                const allTranscript = Array.from(event.results)
-                    .map(r => r[0].transcript + (r.isFinal ? '\n' : ''))
-                    .join('');
-                
-                transcriptEl.textContent = allTranscript;
-                transcriptEl.scrollTop = transcriptEl.scrollHeight;
-            };
+            });
+            log("AIモデル準備完了！");
+        } catch (e) {
+            log("モデル読込エラー: " + e.message);
+            alert("AIモデルの読み込みに失敗しました。");
+        } finally {
+            loadingIndicator.classList.add('hidden');
+        }
+        return transcriber;
+    }
 
-            recognition.onend = () => {
-                if (isRecording) recognition.start(); // 意図しない停止対策
-            };
-            recognition.start();
+    // バックグラウンドでモデル読み込み開始
+    setTimeout(loadModel, 1000);
 
-            // B. 録音 (MediaRecorder)
-            mediaRecorder = new MediaRecorder(stream, { mimeType: MIME_TYPE });
+
+    // --- 2. 録音開始 ---
+    async function startRecording() {
+        transcriptEl.textContent = "録音中...停止後に解析します。";
+        audioChunks = [];
+        playerArea.classList.add('hidden');
+        
+        try {
+            const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            mediaRecorder = new MediaRecorder(stream, { mimeType: 'audio/webm' });
+            
             mediaRecorder.ondataavailable = e => {
-                if (e.data.size > 0) audioChunks.push(e.data);
+                if(e.data.size > 0) audioChunks.push(e.data);
             };
+            
             mediaRecorder.start();
-
-            // UI更新
             isRecording = true;
-            indicator.classList.remove('hidden');
             toggleButtons(true);
-            log("録音中...");
-
-        } catch (err) {
-            console.error(err);
-            alert("マイクの起動に失敗しました: " + err.message);
+            log("録音開始");
+            
+        } catch (e) {
+            log("マイクエラー: " + e.message);
+            alert("マイクへのアクセスを許可してください");
         }
     }
 
-    // --- 2. 停止＆処理実行 ---
+    // --- 3. 録音停止 ＆ 処理フロー ---
     function stopRecording() {
         if (!isRecording) return;
         isRecording = false;
-        log("処理中...お待ちください");
-
-        // 停止処理
-        recognition.stop();
-        mediaRecorder.stop();
+        log("録音終了。処理を開始します...");
         
-        // 録音データが確定したら処理開始
         mediaRecorder.onstop = async () => {
-            const blob = new Blob(audioChunks, { type: MIME_TYPE });
-            
-            // 無音削除処理へ
+            toggleButtons(false);
+            loadingIndicator.classList.remove('hidden');
+            progressText.textContent = "音声処理中...";
+
             try {
-                const processedUrl = await processSilence(blob);
+                // A. Blob作成
+                const blob = new Blob(audioChunks, { type: 'audio/webm' });
                 
-                // プレイヤー設定
-                audioPlayer.src = processedUrl;
-                downloadLink.href = processedUrl;
-                downloadLink.download = `rec_${new Date().getTime()}.wav`;
+                // B. AudioContextでデコード & 無音削除
+                const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                const arrayBuffer = await blob.arrayBuffer();
+                const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
                 
+                // C. 無音削除実行
+                const { processedBuffer, wavUrl } = await removeSilence(audioBuffer, audioContext);
+                
+                // プレイヤー更新
+                audioPlayer.src = wavUrl;
+                downloadLink.href = wavUrl;
+                downloadLink.download = `rec_processed.wav`;
                 playerArea.classList.remove('hidden');
-                log("完了");
+                
+                // D. AI文字起こし実行
+                log("AIによる文字起こし開始...");
+                progressText.textContent = "AI解析中...";
+                
+                // モデルがまだなら待つ
+                const pipe = await loadModel();
+                
+                // AudioBufferからPCMデータ(Float32Array)を取得
+                const audioData = processedBuffer.getChannelData(0);
+                
+                // 推論実行 (日本語指定)
+                const output = await pipe(audioData, {
+                    language: 'japanese',
+                    task: 'transcribe',
+                    chunk_length_s: 30,
+                    stride_length_s: 5
+                });
+                
+                // 結果表示
+                transcriptEl.textContent = output.text;
+                log("完了しました");
+
             } catch (e) {
+                log("処理エラー: " + e.message);
                 console.error(e);
-                alert("音声処理に失敗しました: " + e.message);
-                // 失敗時は生データを返す
-                audioPlayer.src = URL.createObjectURL(blob);
-                playerArea.classList.remove('hidden');
+                transcriptEl.textContent = "エラーが発生しました: " + e.message;
+            } finally {
+                loadingIndicator.classList.add('hidden');
             }
         };
 
-        // UI更新
-        indicator.classList.add('hidden');
-        toggleButtons(false);
+        mediaRecorder.stop();
+        mediaRecorder.stream.getTracks().forEach(track => track.stop());
     }
 
-    // --- 3. 無音削除ロジック (Web Audio API) ---
-    async function processSilence(blob) {
-        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-        const arrayBuffer = await blob.arrayBuffer();
-        const audioBuffer = await audioContext.decodeAudioData(arrayBuffer);
 
-        const rawData = audioBuffer.getChannelData(0); // モノラルデータ取得
+    // --- 無音削除ロジック (Web Audio API) ---
+    async function removeSilence(audioBuffer, context) {
+        const rawData = audioBuffer.getChannelData(0);
         const sampleRate = audioBuffer.sampleRate;
-        
-        // 設定: 閾値とパディング
-        const threshold = 0.05; // 音量閾値 (0.05くらいが雑音を拾わず適当)
-        const padding = 0.2;    // 残す余白(秒)
-        const paddingSamples = padding * sampleRate;
+        const threshold = 0.05; 
+        const padding = Math.floor(0.2 * sampleRate);
 
-        // 有音区間の検出
-        const activeRanges = [];
-        let start = null;
-
-        for (let i = 0; i < rawData.length; i += 100) { // 間引いて高速化
-            const val = Math.abs(rawData[i]);
-            if (val > threshold) {
-                if (start === null) start = Math.max(0, i - paddingSamples);
-            } else {
-                if (start !== null) {
-                    // 無音がしばらく続いたら区間終了とみなす簡易ロジック
-                    // ここではループごとに判定せず、後処理でマージする方式をとるため
-                    // 単純に「閾値超え」を見つけるだけでよいが、
-                    // 今回はシンプルに「閾値を超えたらその周辺を有効」とする
-                }
-            }
-        }
-        
-        // 正確なアルゴリズム：すべてのサンプルを走査して区間を結合
-        let isVoice = false;
-        let lastVoiceIndex = 0;
+        // 有音区間検出
         let ranges = [];
-        
-        // シンプルかつ確実なロジック：
-        // 1. 閾値を超えるポイントをすべて見つける
-        // 2. そのポイントから前後 paddingSamples 分を「有効」としてマークする
-        // 3. 有効な部分だけを抽出して結合する
-        
-        // マスク配列を作成 (0:無音, 1:有音) - メモリ節約のためUint8Array
-        const mask = new Uint8Array(rawData.length);
-        
         for (let i = 0; i < rawData.length; i++) {
             if (Math.abs(rawData[i]) > threshold) {
-                // 前後を1で埋める
-                let s = Math.max(0, i - paddingSamples);
-                let e = Math.min(rawData.length, i + paddingSamples);
-                // 範囲埋め（ループだと重いので、開始点と終了点だけ管理して後でスイープも可だが、
-                // JSのfillは高速なのでここでは都度fillしないよう工夫する）
-                
-                // 愚直だが確実に: 有効区間のstart/endリストを作る
-                ranges.push([s, e]);
-                i = e; // スキップ
+                let start = Math.max(0, i - padding);
+                let end = Math.min(rawData.length, i + padding);
+                ranges.push([start, end]);
+                i = end; // 少しスキップ
             }
         }
 
-        // 区間のマージ
-        if (ranges.length === 0) return URL.createObjectURL(blob); // 全て無音の場合
+        if (ranges.length === 0) {
+            // 全部無音の場合
+            return { processedBuffer: audioBuffer, wavUrl: bufferToWave(audioBuffer, rawData.length) };
+        }
 
+        // マージ
         let merged = [ranges[0]];
         for (let i = 1; i < ranges.length; i++) {
             let last = merged[merged.length - 1];
@@ -263,84 +243,50 @@
             }
         }
 
-        // 新しいバッファの長さを計算
-        let totalLen = merged.reduce((sum, r) => sum + (r[1] - r[0]), 0);
-        
         // 新しいバッファ作成
-        const newBuffer = audioContext.createBuffer(1, totalLen, sampleRate);
-        const newData = newBuffer.getChannelData(0);
+        let totalLen = merged.reduce((s, r) => s + (r[1] - r[0]), 0);
+        let outBuf = context.createBuffer(1, totalLen, sampleRate);
+        let outData = outBuf.getChannelData(0);
         
         let offset = 0;
         merged.forEach(r => {
-            const len = r[1] - r[0];
-            // 部分配列をコピー
-            newData.set(rawData.subarray(r[0], r[1]), offset);
-            offset += len;
+            outData.set(rawData.subarray(r[0], r[1]), offset);
+            offset += (r[1] - r[0]);
         });
 
-        return bufferToWave(newBuffer, totalLen);
+        const wavUrl = bufferToWave(outBuf, totalLen);
+        return { processedBuffer: outBuf, wavUrl: wavUrl };
     }
 
-    // --- AudioBuffer -> WAV 変換 ---
     function bufferToWave(abuffer, len) {
-        let numOfChan = 1;
-        let length = len * numOfChan * 2 + 44;
+        let length = len * 2 + 44;
         let buffer = new ArrayBuffer(length);
         let view = new DataView(buffer);
-        let channels = [], i, sample;
-        let offset = 0;
         let pos = 0;
+        const setUint16 = (d) => { view.setUint16(pos, d, true); pos+=2; };
+        const setUint32 = (d) => { view.setUint32(pos, d, true); pos+=4; };
 
-        // WAVヘッダー
-        setUint32(0x46464952); // "RIFF"
-        setUint32(length - 8); // file length - 8
-        setUint32(0x45564157); // "WAVE"
-        setUint32(0x20746d66); // "fmt "
-        setUint32(16); // length = 16
-        setUint16(1); // PCM
-        setUint16(numOfChan);
-        setUint32(abuffer.sampleRate);
-        setUint32(abuffer.sampleRate * 2 * numOfChan);
-        setUint16(numOfChan * 2);
-        setUint16(16); // 16-bit
-        setUint32(0x61746164); // "data"
-        setUint32(length - pos - 4);
+        setUint32(0x46464952); setUint32(length-8); setUint32(0x45564157);
+        setUint32(0x20746d66); setUint32(16); setUint16(1); setUint16(1);
+        setUint32(abuffer.sampleRate); setUint32(abuffer.sampleRate*2);
+        setUint16(2); setUint16(16); setUint32(0x61746164); setUint32(length-pos-4);
 
-        // データ書き込み
-        let channelData = abuffer.getChannelData(0);
-        while(pos < len) {
-            sample = Math.max(-1, Math.min(1, channelData[pos])); 
-            sample = (0.5 + sample < 0 ? sample * 32768 : sample * 32767)|0; 
-            view.setInt16(44 + offset, sample, true); 
-            offset += 2;
-            pos++;
+        let ch = abuffer.getChannelData(0);
+        let offset = 44;
+        for (let i=0; i<len; i++) {
+            let s = Math.max(-1, Math.min(1, ch[i]));
+            s = (s < 0 ? s * 0x8000 : s * 0x7FFF)|0;
+            view.setInt16(offset, s, true);
+            offset+=2;
         }
-
         return URL.createObjectURL(new Blob([buffer], {type: "audio/wav"}));
-
-        function setUint16(data) { view.setUint16(pos, data, true); pos += 2; }
-        function setUint32(data) { view.setUint32(pos, data, true); pos += 4; }
     }
 
-    // UI制御ヘルパー
-    function toggleButtons(isRec) {
-        if(isRec) {
-            recordBtn.disabled = true;
-            recordBtn.classList.replace('bg-red-500', 'bg-slate-300');
-            stopBtn.disabled = false;
-            stopBtn.classList.replace('bg-gray-300', 'bg-blue-600');
-            stopBtn.classList.replace('text-gray-500', 'text-white');
-        } else {
-            recordBtn.disabled = false;
-            recordBtn.classList.replace('bg-slate-300', 'bg-red-500');
-            stopBtn.disabled = true;
-            stopBtn.classList.replace('bg-blue-600', 'bg-gray-300');
-            stopBtn.classList.replace('text-white', 'text-gray-500');
-        }
-    }
-    
-    function log(msg) {
-        logMessage.textContent = msg;
+    function toggleButtons(rec) {
+        recordBtn.disabled = rec;
+        recordBtn.className = rec ? "bg-slate-700 text-slate-500 font-bold py-4 rounded-xl shadow-lg flex flex-col items-center justify-center" : "bg-red-600 active:bg-red-700 text-white font-bold py-4 rounded-xl shadow-lg flex flex-col items-center justify-center";
+        stopBtn.disabled = !rec;
+        stopBtn.className = !rec ? "bg-slate-600 text-slate-500 font-bold py-4 rounded-xl shadow-lg flex flex-col items-center justify-center" : "bg-blue-600 active:bg-blue-700 text-white font-bold py-4 rounded-xl shadow-lg flex flex-col items-center justify-center";
     }
 </script>
 </body>
